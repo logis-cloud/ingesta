@@ -1,134 +1,69 @@
 import os
 import time
-import json
 from io import StringIO
 
 import boto3
 import pandas as pd
 from pymongo import MongoClient
 
+# A diferencia de MySQL/Postgres (host/puerto/usuario sueltos), Mongo se
+# configura con una URI completa — mismo criterio que ya usa Mongoose en
+# svc-shipments (MONGODB_URI), aplicado acá con pymongo.
+MONGO_URI = os.environ["MONGO_URI"]
+DB_NAME = os.environ.get("DB_NAME", "shipments_db")
 
-DB_HOST = os.getenv("DB_HOST", "172.31.7.86")
-DB_NAME = os.getenv("DB_NAME", "shipments_db")
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "root123")
-DB_PORT = int(os.getenv("DB_PORT", "27017"))
+S3_BUCKET = os.environ["S3_BUCKET_NAME"]
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
-S3_BUCKET = os.getenv("S3_BUCKET_NAME", "logistica-grupo1-20262")
-
-INTERVALO_SEGUNDOS = int(os.getenv("INTERVALO_INGESTA", "60"))
+INTERVALO_SEGUNDOS = int(os.environ.get("INTERVALO_INGESTA", "60"))
+REINTENTO_SEGUNDOS = int(os.environ.get("RETRY_INGESTA", "10"))
 
 COLECCION = "envios"
 
 
-def ejecutar_ingesta_individual():
-    """Ejecuta un ciclo de extracción desde MongoDB e ingesta a S3."""
-
+def ejecutar_ingesta_individual() -> bool:
     client = None
-
     try:
-        print(
-            f"Conectando a MongoDB ({DB_NAME}) "
-            f"en {DB_HOST}:{DB_PORT}..."
-        )
-
-        client = MongoClient(
-            host=DB_HOST,
-            port=DB_PORT,
-            username=DB_USER,
-            password=DB_PASSWORD,
-            authSource="admin",
-        )
-
+        print(f"Conectando a MongoDB ({DB_NAME})...")
+        # serverSelectionTimeoutMS corto: si la VM de BDs todavía no
+        # levantó el contenedor de Mongo, que falle rápido y deje que el
+        # loop principal reintente en REINTENTO_SEGUNDOS, en vez de
+        # colgarse con el timeout default de pymongo (30s).
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client[DB_NAME]
-        collection = db[COLECCION]
 
-        documentos = list(collection.find({}))
+        print(f"--- Procesando colección Mongo: {COLECCION} ---")
+        documentos = list(db[COLECCION].find())
 
-        print(
-            f"--- Procesando colección MongoDB: {COLECCION} "
-            f"({len(documentos)} documentos) ---"
-        )
+        # _id es un ObjectId, no serializable directo a CSV: se castea a
+        # string. "items" es una lista de longitud variable (no aplana
+        # bien a columnas fijas), se deja como JSON en una sola columna.
+        # Los demás sub-documentos (direccionEntrega, vehiculoAsignado,
+        # conductorAsignado) sí se aplanan a columnas propias.
+        for doc in documentos:
+            doc["_id"] = str(doc["_id"])
+            if "items" in doc:
+                doc["items"] = str(doc["items"])
 
-        registros = []
-
-        for documento in documentos:
-            documento.pop("_id", None)
-
-            registro = {
-                "codigoSeguimiento": documento.get("codigoSeguimiento"),
-                "clienteId": documento.get("clienteId"),
-                "pedidoId": documento.get("pedidoId"),
-                "estado": documento.get("estado"),
-                "fechaCreacion": documento.get("fechaCreacion"),
-                "fechaActualizacion": documento.get("fechaActualizacion"),
-            }
-
-            direccion = documento.get("direccionEntrega") or {}
-
-            registro.update({
-                "direccionEntrega_calle": direccion.get("calle"),
-                "direccionEntrega_distrito": direccion.get("distrito"),
-                "direccionEntrega_ciudad": direccion.get("ciudad"),
-                "direccionEntrega_codigoPostal": direccion.get("codigoPostal"),
-                "direccionEntrega_referencia": direccion.get("referencia"),
-            })
-
-            vehiculo = documento.get("vehiculoAsignado") or {}
-
-            registro.update({
-                "vehiculoAsignado_idVehiculo": vehiculo.get("idVehiculo"),
-                "vehiculoAsignado_placa": vehiculo.get("placa"),
-                "vehiculoAsignado_tipo": vehiculo.get("tipo"),
-                "vehiculoAsignado_marca": vehiculo.get("marca"),
-                "vehiculoAsignado_modelo": vehiculo.get("modelo"),
-            })
-
-            conductor = documento.get("conductorAsignado") or {}
-
-            registro.update({
-                "conductorAsignado_idConductor": conductor.get("idConductor"),
-                "conductorAsignado_nombre": conductor.get("nombre"),
-                "conductorAsignado_apellido": conductor.get("apellido"),
-                "conductorAsignado_dni": conductor.get("dni"),
-                "conductorAsignado_turno": conductor.get("turno"),
-            })
-
-            # Los items son un arreglo. Lo conservamos como JSON
-            # dentro de una sola columna del CSV.
-            registro["items"] = json.dumps(
-                documento.get("items", []),
-                ensure_ascii=False,
-            )
-
-            registros.append(registro)
-
-        df = pd.DataFrame(registros)
+        df = pd.json_normalize(documentos, sep=".")
 
         csv_buffer = StringIO()
         df.to_csv(csv_buffer, index=False)
 
+        s3_client = boto3.client("s3", region_name=AWS_REGION)
         s3_key = f"ingesta/{DB_NAME}/{COLECCION}/{COLECCION}.csv"
 
-        s3_client = boto3.client(
-            "s3",
-            region_name="us-east-1",
-        )
-
         s3_client.put_object(
-            Bucket=S3_BUCKET,
-            Key=s3_key,
-            Body=csv_buffer.getvalue(),
+            Bucket=S3_BUCKET, Key=s3_key, Body=csv_buffer.getvalue()
         )
-
         print(
-            f"¡Éxito! {len(df)} registros actualizados "
-            f"en s3://{S3_BUCKET}/{s3_key}"
+            f"¡Éxito! {len(df)} registros actualizados en s3://{S3_BUCKET}/{s3_key}"
         )
+        return True
 
     except Exception as e:
-        print(f"Error durante el ciclo de ingesta MongoDB: {e}")
-
+        print(f"Error durante el ciclo de ingesta: {e}")
+        return False
     finally:
         if client:
             client.close()
@@ -136,16 +71,12 @@ def ejecutar_ingesta_individual():
 
 if __name__ == "__main__":
     print(
-        "Iniciando servicio de ingesta continua de MongoDB "
-        f"(Intervalo: {INTERVALO_SEGUNDOS}s)..."
+        "Iniciando servicio de ingesta continua de Envíos "
+        f"(intervalo éxito: {INTERVALO_SEGUNDOS}s, reintento en fallo: {REINTENTO_SEGUNDOS}s)..."
     )
 
     while True:
-        ejecutar_ingesta_individual()
-
-        print(
-            f"Esperando {INTERVALO_SEGUNDOS} segundos "
-            "para la siguiente extracción...\n"
-        )
-
-        time.sleep(INTERVALO_SEGUNDOS)
+        exito = ejecutar_ingesta_individual()
+        espera = INTERVALO_SEGUNDOS if exito else REINTENTO_SEGUNDOS
+        print(f"Esperando {espera} segundos para la siguiente extracción...\n")
+        time.sleep(espera)

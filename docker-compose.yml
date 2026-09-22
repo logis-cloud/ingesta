@@ -6,6 +6,11 @@ services:
     container_name: ingesta-clientes
     env_file:
       - ./ingesta-clientes/.env
+    # Fallback: si algún día no usas IamInstanceProfile (ver infra.yml),
+    # boto3 recogerá credenciales de este archivo montado. Si no existe
+    # en el host, Docker monta un directorio vacío y boto3 simplemente
+    # sigue al siguiente proveedor de credenciales (el instance profile),
+    # así que dejarlo montado no rompe nada aunque no lo uses.
     volumes:
       - /home/ubuntu/.aws:/root/.aws:ro
     restart: unless-stopped
