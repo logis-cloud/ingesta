@@ -11,9 +11,9 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # Configuración de BD y S3 vía variables de entorno
 DB_HOST = os.getenv("DB_HOST", "172.31.7.86")
-DB_NAME = os.getenv("DB_NAME", "bd_vehiculos")
+DB_NAME = os.getenv("DB_NAME", "vehicles_db")
 DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "postgrespassword")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres123")
 DB_PORT = os.getenv("DB_PORT", "5432")
 
 S3_BUCKET = os.getenv("S3_BUCKET_NAME", "logistica-grupo1-20262")
