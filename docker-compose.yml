@@ -1,0 +1,31 @@
+services:
+
+  ingesta-clientes:
+    build:
+      context: ./ingesta-clientes
+    container_name: ingesta-clientes
+    env_file:
+      - ./ingesta-clientes/.env
+    volumes:
+      - /home/ubuntu/.aws:/root/.aws:ro
+    restart: unless-stopped
+
+  ingesta-vehiculos:
+    build:
+      context: ./ingesta-vehiculos
+    container_name: ingesta-vehiculos
+    env_file:
+      - ./ingesta-vehiculos/.env
+    volumes:
+      - /home/ubuntu/.aws:/root/.aws:ro
+    restart: unless-stopped
+
+  ingesta-envios:
+    build:
+      context: ./ingesta-envios
+    container_name: ingesta-envios
+    env_file:
+      - ./ingesta-envios/.env
+    volumes:
+      - /home/ubuntu/.aws:/root/.aws:ro
+    restart: unless-stopped
